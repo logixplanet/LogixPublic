@@ -1,0 +1,202 @@
+<?php
+require("../common.php");
+if (! isset ( $_GET ['key'] ) || $_GET ['key'] != $SECURITY_KEY) {
+	die("Security Error");
+}
+
+$xml = simplexml_load_string ( $_POST ["data"] ) or die ( "Error: Can not create object" );
+$response = (object) array(error => false, error_msg => "");
+
+//CLEAR TEMP TABLES
+$query = "
+	TRUNCATE TEMPPurchaseOrders;
+	TRUNCATE TEMPPurchaseOrderLines;
+	";
+
+try
+{
+	$stmt = $db->prepare($query);
+	$result = $stmt->execute();
+}
+catch(PDOException $ex)
+{
+	$response->error = true;
+	$response->error_msg = "Failed to run query";// . $ex->getMessage();
+}
+
+if(!$response->error){
+	foreach ( $xml->children () as $order ) {
+		//INSERT HEADERS
+	
+		$query_params = array(
+			':ponumber' => $order['po'],
+			':vendorno' => $order['vn'],
+			':vendorname' => substr($order['vm'], 0, 50),
+			':shiptolocation' => $order['lo'],
+			':shipdate' => $order['sd'],
+			':receiptdate' => $order['rd']
+		);
+		
+		$query = "
+		INSERT INTO TEMPPurchaseOrders (
+			PONumber
+			,VendorNo
+			,VendorName
+			,ShipToLocation
+			,ShipDate
+			,ReceiptDate
+		) VALUES (
+			:ponumber,
+			:vendorno,
+			:vendorname,
+			:shiptolocation,
+			:shipdate,
+			:receiptdate
+		)
+		";
+	
+		try
+		{
+			$stmt = $db->prepare($query);
+			$result = $stmt->execute($query_params);
+		}
+		catch(PDOException $ex)
+		{
+			$response->error = true;
+			$response->error_msg = "Failed to run query";// . $ex->getMessage();
+		}
+		
+		if(!$response->error){
+			foreach ( $order->children () as $line ) {
+				//INSERT LINES
+				$insert_fields = "";
+				$insert_values = "";
+				
+				$query_params = array(
+					':ponumber' => $order['po'],
+					':lineno' => $line['ln'],
+					':itemnumber' => $line['it'],
+					':qtyshipped' => $line['qs'],
+					':linetype' => $line['lt'],
+					':split' => 0,
+					':status' => 'Open'
+				);
+				
+				if(isset($line['vi'])) {
+					$query_params[':vendorinvoice'] = $line['vi'];
+						
+					$insert_fields .= ",VendorInvoice";
+					$insert_values .= ",:vendorinvoice";
+				}
+				
+				$query = "
+				INSERT INTO TEMPPurchaseOrderLines (
+					PONumber,
+					LineNo,
+					ItemNumber,
+					QtyShipped,
+					LineType,
+					Split,
+					Status
+					" . $insert_fields . "
+				) VALUES (
+					:ponumber,
+					:lineno,
+					:itemnumber,
+					:qtyshipped,
+					:linetype,
+					:split,
+					:status
+					" . $insert_values . "
+				)
+				";
+				
+				try
+				{
+					$stmt = $db->prepare($query);
+					$result = $stmt->execute($query_params);
+				}
+				catch(PDOException $ex)
+				{
+					$response->error = true;
+					$response->error_msg = "Failed to run query";// . $ex->getMessage();
+				}
+			}
+		}
+	}
+}
+
+if(!$response->error){
+	//RUN QUERIES TO COMPARE TWO TABLES
+	$query = "
+		DELETE FROM PurchaseOrderLines
+			WHERE Split = 1
+				AND Status IN ('Open','Downloaded');
+		
+		DELETE a.* FROM PurchaseOrders a
+		LEFT OUTER JOIN TEMPPurchaseOrders b
+			ON b.PONumber = a.PONumber
+		WHERE b.id IS NULL;
+		
+		DELETE a.* FROM PurchaseOrderLines a
+		LEFT OUTER JOIN TEMPPurchaseOrderLines b
+			ON b.PONumber = a.PONumber
+				AND b.LineNo = a.LineNo
+				AND b.LineType = a.LineType
+				AND a.Split = 0
+		WHERE b.id IS NULL;
+		
+		INSERT INTO PurchaseOrders
+		SELECT NULL id,
+			a.PONumber,
+			a.VendorNo,
+			a.VendorName,
+			a.ShipToLocation,
+			a.ShipDate,
+			a.ReceiptDate
+		FROM TEMPPurchaseOrders a
+		LEFT OUTER JOIN PurchaseOrders b
+			ON b.PONumber = a.PONumber
+		WHERE b.id IS NULL;
+		
+		INSERT INTO PurchaseOrderLines
+		SELECT NULL id,
+			a.PONumber,
+			a.LineNo,
+			a.ItemNumber,
+			a.QtyShipped,
+			a.QtyReceived,
+			a.DateReceived,
+			a.VendorInvoice,
+			a.Status,
+			a.LineType,
+			a.Split
+		FROM TEMPPurchaseOrderLines a
+		LEFT OUTER JOIN PurchaseOrderLines b
+			ON b.PONumber = a.PONumber
+		    	AND b.LineNo = a.LineNo
+		        AND b.LineType = a.LineType
+		WHERE b.id IS NULL;
+		
+		UPDATE PurchaseOrderLines b
+		LEFT OUTER JOIN TEMPPurchaseOrderLines a
+			ON b.PONumber = a.PONumber
+		    	AND b.LineNo = a.LineNo
+		        AND b.LineType = a.LineType
+		  SET b.VendorInvoice = a.VendorInvoice,
+			b.QtyShipped = a.QtyShipped
+		WHERE b.VendorInvoice != a.VendorInvoice OR b.QtyShipped != a.QtyShipped;
+	";
+	
+	try
+	{
+		$stmt = $db->prepare($query);
+		$result = $stmt->execute();
+	}
+	catch(PDOException $ex)
+	{
+		$response->error = true;
+		$response->error_msg = "Failed to run query";// . $ex->getMessage();
+	}
+}
+?>
